@@ -11,19 +11,21 @@ DB_NUTRIENT_LOCATION = DB_LOCATION / "nutrient.csv"
 DB_FOOD_NUTRIENT_LOCATION = DB_LOCATION / "food_nutrient.csv"
 
 
-
 class FoodCategory(NamedTuple):
     id_: int
     description: str
+
 
 class NutrientCategory(NamedTuple):
     id_: int
     name: str
     unit: str
 
+
 class Nutrient(NamedTuple):
     nutrient_category: NutrientCategory
     amount: float
+
 
 class Food(NamedTuple):
     fdc_id: int
@@ -58,6 +60,7 @@ class FoodDatabase:
                 id_ = int(id_)
                 self.food_categories[id_] = FoodCategory(id_, description)
 
+
     def load_nutrient_categories(self) -> None:
         with open(DB_NUTRIENT_LOCATION, 'r', newline='') as csvfile:
             # Drop the first line, which is the header
@@ -82,6 +85,7 @@ class FoodDatabase:
                         Food(fdc_id, description,
                              self.food_categories[food_category_id], [])
 
+
     def load_food_nutrients(self) -> None:
         with open(DB_FOOD_NUTRIENT_LOCATION, 'r', newline='') as csvfile:
             # Drop the first line, which is the header
@@ -95,4 +99,16 @@ class FoodDatabase:
                 self.foods[fdc_id].nutrients.append(
                     Nutrient(self.nutrient_categories[nutrient_id], amount))
 
+
+    def search_food(self, name: str) -> List[Food]:
+        # Super simple food search, probably the reason why we are in a class
+        # named next-gen search systems
+        #
+        # Once we port this over to an actual database, this will be more robust
+        return [food for food in self.foods.values() if name.lower() in
+                food.description.lower()]
+
 a = FoodDatabase()
+print("Search results for Clam Chowder:")
+for food in a.search_food("Clam Chowder"):
+    print(food.description)
