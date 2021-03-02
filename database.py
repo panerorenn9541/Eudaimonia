@@ -4,6 +4,9 @@ from sqlite3 import connect, Connection
 import os
 from pathlib import Path
 import csv
+import datetime
+from collections import defaultdict
+from itertools import zip_longest
 
 SCRIPT_LOCATION = Path(__file__).absolute().parent
 DB_LOCATION = SCRIPT_LOCATION / "db"
@@ -40,6 +43,13 @@ class Database:
         self.conn = connect(location)
         self.migrate()
 
+
+    #####
+    #
+    # Migration
+    #
+    #####
+
     def migrate(self) -> None:
         c = self.conn.cursor()
         c.execute("""PRAGMA foreign_keys = ON;""")
@@ -51,6 +61,7 @@ class Database:
                         id INTEGER PRIMARY KEY,
                         descr TEXT,
                         food_category_id INTEGER,
+                        liked INTEGER,
                         FOREIGN KEY(food_category_id) REFERENCES food_categories(id)
                   );""")
         c.execute("""CREATE TABLE food_nutrients_junction(
@@ -59,12 +70,51 @@ class Database:
                         nutrient_id INTEGER REFERENCES nutrient_categories(id),
                         amount REAL
                     );""")
+        c.execute("""CREATE TABLE food_log(
+                        id INTEGER PRIMARY KEY,
+                        food_id INTEGER REFERENCES foods(id),
+                        datetim TEXT,
+                        type TEXT);""")
+        c.execute("""CREATE TABLE food_exclusion(
+                        id INTEGER PRIMARY KEY,
+                        food_category_id INTEGER REFERENCES
+                        food_categories(id));""")
+        c.execute("""CREATE TABLE curated_foods(
+                        id INTEGER PRIMARY KEY,
+                        food_desc TEXT,
+                        type TEXT);""")
+        c.execute("""CREATE TABLE prioritized_nutrients(
+                        id INTEGER PRIMARY KEY,
+                        category_id REFERENCES nutrient_categories(id),
+                        priority INTEGER);""")
 
         # Migrate
         self.migrate_food_categories()
         self.migrate_nutrient_categories()
         self.migrate_foods()
         self.migrate_food_nutrients()
+
+        # Manually fill in the curated foods
+        c.executemany("""INSERT INTO curated_foods VALUES (null, ?, ?)""",
+                      [
+                          ("Egg", "Breakfast"),
+                          ("Cereal", "Breakfast"),
+                          ("Bagel", "Breakfast"),
+
+                          ("Salad", "Lunch"),
+                          ("Hamburger", "Lunch"),
+                          ("Cheeseburger", "Lunch"),
+                          ("Sandwich", "Lunch"),
+                          ("Wings", "Lunch"),
+
+                          ("Chicken", "Dinner"),
+                          ("Fish", "Dinner"),
+                          ("Pasta", "Dinner"),
+                          ("Steak", "Dinner"),
+                          ("Salad", "Dinner"),
+                          ("Ravioli", "Dinner"),
+                          ("Chili", "Dinner")
+                      ])
 
         # Build indices
         c.execute("""CREATE INDEX index_food_categories ON food_categories(id);""")
@@ -110,7 +160,8 @@ class Database:
                 fdc_id = int(fdc_id)
                 food_category_id = int(food_category_id)
                 if food_category_id:
-                    c.execute("""INSERT INTO foods VALUES (?, ?, ?);""", [fdc_id, description, food_category_id])
+                    c.execute("""INSERT INTO foods VALUES (?, ?, ?, ?);""",
+                              [fdc_id, description, food_category_id, 0])
         c.execute("""COMMIT;""")
 
 
@@ -151,7 +202,7 @@ class Database:
         # https://stackoverflow.com/questions/3293790/query-to-count-words-sqlite-3
         QUERY="""
                 SELECT id, descr,
-                    food_category_id,
+                    food_category_id, liked,
 
                     like(:needle || "%", descr) AS is_prefix,
                     like("% NS %", descr) AS is_ns,
@@ -166,9 +217,14 @@ class Database:
                     (SELECT count(*) FROM foods AS f
                      WHERE f.food_category_id = foods.food_category_id
                      AND like("%" || :needle || "%", f.descr))
-                    AS category_count
+                    AS category_count,
 
-                    FROM foods WHERE is_anywhere ORDER BY
+                    (SELECT count(*) FROM food_exclusion AS f WHERE
+                    f.food_category_id = foods.food_category_id) as restricted
+
+                    FROM foods WHERE (is_anywhere AND NOT restricted AND liked
+                    >= -3)
+                    ORDER BY liked DESC,
                         is_prefix DESC, category_count DESC,
                         is_ns DESC, is_nfs DESC, count_comma DESC,
                         has_parenthesis ASC, descr;
@@ -178,12 +234,13 @@ class Database:
         for id_, desc, food_category_id, *_ in c.execute(QUERY, {"needle": needle}):
             #print(id_, desc, food_category_id, _)
             results.append(Food(int(id_), desc, int(food_category_id)))
+
         return results
 
     def get_food(self, id_: int) -> Food:
         c = self.conn.cursor()
 
-        id_, desc, food_category_id = c.execute("""SELECT * FROM foods WHERE id = ?""", [id_]).fetchone()
+        id_, desc, food_category_id, liked = c.execute("""SELECT * FROM foods WHERE id = ?""", [id_]).fetchone()
         id_ = int(id_)
         food_category_id = int(food_category_id)
 
@@ -215,10 +272,107 @@ class Database:
         return NutrientCategory(id_, name, unit)
 
 
+    #####
+    #
+    # Inputting
+    #
+    #####
+
+    def input_food_log(self, food_id: int,
+                       time: datetime.datetime,
+                       type_: Literal["Breakfast", "Lunch", "Dinner", "Snack"],
+                       liked: int = 0) -> None:
+        # liked: 0 neutral, 1 yes, 2 no
+        c = self.conn.cursor()
+
+        c.execute("""INSERT INTO food_log VALUES (?, ?, ?, ?)""",
+                  [None, food_id, time.isoformat(), type_])
+        c.execute("""UPDATE foods SET liked = liked + ? WHERE id = ?""",
+                  [liked, food_id])
+
+    def input_food_restriction(self, category_id: int) -> None:
+        c = self.conn.cursor()
+
+        c.execute("""INSERT INTO food_exclusion VALUES (?, ?)""",
+                  [None, category_id])
+
+    def input_nutrient_prioritization(self, category_id: int, priority: int) -> None:
+        c = self.conn.cursor()
+
+        c.execute("""INSERT INTO prioritized_nutrients VALUES (?, ?, ?)""",
+                  [None, category_id, priority])
+
+    #####
+    #
+    # Recommendation
+    #
+    #####
+
+    def recommend(self, type_: Literal["Breakfast", "Lunch", "Dinner", "Snack"]) -> List[Food]:
+        c = self.conn.cursor()
+
+        QUERY="""
+                SELECT F.id, F.descr,
+                    F.food_category_id, F.liked,
+
+                    (SELECT count(*) FROM food_exclusion AS ff WHERE
+                    ff.food_category_id = F.food_category_id) as restricted,
+
+                    (SELECT sum(amount) FROM food_nutrients_junction AS ff
+                    INNER JOIN prioritized_nutrients P ON ff.nutrient_id =
+                    P.category_id
+                    WHERE ff.food_id = F.id LIMIT 1) as prio
+
+                    FROM foods F
+                    INNER JOIN curated_foods cur ON like("%" || cur.food_desc ||
+                    "%", F.descr) AND cur.type = ?
+
+                    JOIN prioritized_nutrients P
+                    JOIN food_nutrients_junction ON food_nutrients_junction.food_id = F.id AND P.category_id = food_nutrients_junction.nutrient_id
+
+                    WHERE (NOT restricted AND liked = 0 AND prio > 0 AND food_nutrients_junction.amount > 0.1)
+                    ORDER BY
+                        P.priority DESC, food_nutrients_junction.amount DESC,
+                        RANDOM();
+                """
+        results = []
+        for id_, desc, food_category_id, *_ in c.execute(QUERY, [type_]):
+            print(id_, desc, food_category_id, _)
+            results.append(Food(int(id_), desc, int(food_category_id)))
+
+        return results
+
+
+
+
 
 
 def main():
     db = Database()
+    # Soups
+    db.input_food_restriction(3802)
+    # Baby foods
+    db.input_food_restriction(9002)
+    db.input_food_restriction(9004)
+    db.input_food_restriction(9006)
+    db.input_food_restriction(9008)
+    db.input_food_restriction(9010)
+    db.input_food_restriction(9012)
+    db.input_food_restriction(9202)
+    db.input_food_restriction(9204)
+
+    # I absolutely hate raw tomatoes! (not true)
+    db.input_food_log(1103276, datetime.datetime.now(), "Snack", -3)
+    # But I like pasta with tomato-based sauce and cheese
+    db.input_food_log(1102211, datetime.datetime.now(), "Snack", 1)
+
+    # Prioritize iron intake, then protein
+    db.input_nutrient_prioritization(1089, 2)
+    db.input_nutrient_prioritization(1003, 1)
+
+    db.recommend("Lunch")
+    #print(db.recommend("Lunch"))
+
     while (line := input("Food> ")):
         for i, row in enumerate(db.search_food(line)):
             print(f"{row.fdc_id}   {row.description:30}")
@@ -232,7 +386,7 @@ def main():
                     nutrients = db.get_nutrients(inp)
 
                     print(f"Food: {desc}")
-                    print(f"Food category: {category_desc}")
+                    print(f"Food category ({food_category_id}): {category_desc}")
                     for nutrient_id, nutrient_amount in nutrients:
                         if nutrient_amount < 0.1: continue
 
