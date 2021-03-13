@@ -503,16 +503,23 @@ class Database:
                     F.food_category_id, F.liked,
 
                     (SELECT count(*) FROM food_exclusion AS ff WHERE
-                    ff.food_category_id = F.food_category_id) as restricted
+                    ff.food_category_id = F.food_category_id) as restricted,
+
+                    (SELECT sum(amount) FROM food_nutrients_junction AS ff
+                    INNER JOIN prioritized_nutrients P ON ff.nutrient_id =
+                    P.category_id
+                    WHERE ff.food_id = F.id LIMIT 1) as prio
 
                     FROM foods F
                     INNER JOIN curated_foods cur ON like("%" || cur.food_desc ||
                     "%", F.descr) AND cur.type = ?
 
 
-                    WHERE (NOT restricted AND F.liked = 0)
+                    WHERE (NOT restricted AND F.liked = 0 AND (prio >= 0 OR prio
+                    IS NULL))
                     ORDER BY
-                        RANDOM()
+                        (prio / RANDOM()) DESC,
+                        RANDOM();
                 """
         results = []
         for id_, desc, food_category_id, *_ in c.execute(QUERY, [type_]):
