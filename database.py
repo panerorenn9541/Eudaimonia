@@ -503,24 +503,16 @@ class Database:
                     F.food_category_id, F.liked,
 
                     (SELECT count(*) FROM food_exclusion AS ff WHERE
-                    ff.food_category_id = F.food_category_id) as restricted,
-
-                    (SELECT sum(amount) FROM food_nutrients_junction AS ff
-                    INNER JOIN prioritized_nutrients P ON ff.nutrient_id =
-                    P.category_id
-                    WHERE ff.food_id = F.id LIMIT 1) as prio
+                    ff.food_category_id = F.food_category_id) as restricted
 
                     FROM foods F
                     INNER JOIN curated_foods cur ON like("%" || cur.food_desc ||
                     "%", F.descr) AND cur.type = ?
 
-                    JOIN prioritized_nutrients P
-                    JOIN food_nutrients_junction ON food_nutrients_junction.food_id = F.id AND P.category_id = food_nutrients_junction.nutrient_id
 
-                    WHERE (NOT restricted AND liked = 0 AND prio > 0 AND food_nutrients_junction.amount > 0.1)
+                    WHERE (NOT restricted AND F.liked = 0)
                     ORDER BY
-                        P.priority DESC, food_nutrients_junction.amount DESC,
-                        RANDOM();
+                        RANDOM()
                 """
         results = []
         for id_, desc, food_category_id, *_ in c.execute(QUERY, [type_]):
@@ -568,14 +560,14 @@ class Database:
         c.execute(QUERY_EARLIEST)
         earliest = datetime.datetime.fromisoformat(c.fetchall()[0][0])
         diff = datetime.datetime.now() - earliest
-        print(diff.days)
+        #print(diff.days)
 
 
         for k, v in self.target_daily.items():
             c.execute(QUERY_START_OF_DAY, (int(k), ))
             sum_amount = c.fetchall()[0][0]
 
-            print(k, v, sum_amount)
+            #print(k, v, sum_amount)
             if abs(v - sum_amount) > v * 0.5:
                 result[0] = max(result[0] - 0.05, 0)
 
@@ -597,7 +589,7 @@ class Database:
                 c.execute(QUERY_7_DAYS_AGO, (int(k), ))
                 sum_amount = c.fetchall()[0][0]
 
-                print(k, v, sum_amount)
+                #print(k, v, sum_amount)
                 if abs(v - sum_amount) > v * 0.5:
                     result[1] = max(result[1] - 0.05, 0)
                 elif abs(v - sum_amount) > v * 0.15:
@@ -610,7 +602,7 @@ class Database:
                 c.execute(QUERY_30_DAYS_AGO, (int(k), ))
                 sum_amount = c.fetchall()[0][0]
 
-                print(k, v, sum_amount)
+                #print(k, v, sum_amount)
                 if abs(v - sum_amount) > v * 0.5:
                     result[2] = max(result[2] - 0.05, 0)
                 elif abs(v - sum_amount) > v * 0.15:
@@ -652,7 +644,8 @@ def main():
     db.recommend("Lunch")
     print(db.recommend("Lunch"))
 
-    while (line := input("Food> ")):
+    line = input("Food> ")
+    while (line):
         for i, row in enumerate(db.search_food(line)):
             print(f"{row.fdc_id}   {row.description:30}")
 
@@ -672,6 +665,7 @@ def main():
                         _, nutrient_name, unit = db.get_nutrient_category(nutrient_id)
                         print(f"{nutrient_name}: {nutrient_amount} {unit}")
                     break
+        line = input("Food> ")
 
 
 
